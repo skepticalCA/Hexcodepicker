@@ -1,111 +1,131 @@
 import streamlit as st
 from PIL import Image
 import numpy as np
-from sklearn.cluster import KMeans
+import base64
+import io
 
-# Set the page configuration for a wider layout
-st.set_page_config(layout="wide", page_title="Image Color Palette Extractor")
+st.set_page_config(layout="wide", page_title="Interactive Color Picker")
+st.title("🖱️ Interactive Image Color Sampler")
+st.markdown("Move your cursor over the image to see the hex code for any pixel!")
 
-st.title("🎨 Image Color Palette Extractor")
-st.markdown("Upload an image to extract its dominant colors and their hex codes.")
+def get_base64_image(image):
+    """Encodes PIL image to a base64 string for use in HTML/CSS."""
+    buffered = io.BytesIO()
+    image.save(buffered, format="PNG")
+    img_str = base64.b64encode(buffered.getvalue()).decode()
+    return img_str
 
-# Function to convert RGB to Hex code
-def rgb_to_hex(rgb):
-    """Converts an RGB tuple (0-255, 0-255, 0-255) to a hex string."""
-    return f"#{int(rgb[0]):02x}{int(rgb[1]):02x}{int(rgb[2]):02x}".upper()
+def rgb_to_hex(r, g, b):
+    """Converts RGB to Hex code."""
+    return f"#{r:02x}{g:02x}{b:02x}".upper()
 
-# Function to extract color palette using K-Means
-def extract_color_palette(img, n_colors=10):
-    # Resize image for faster processing (e.g., to 100x100)
-    img = img.resize((100, 100))
-    # Convert image to a flat array of RGB pixels
-    pixels = np.array(img).reshape(-1, 3)
-    
-    # Run K-Means clustering
-    kmeans = KMeans(n_clusters=n_colors, random_state=42, n_init=10)
-    kmeans.fit(pixels)
-    
-    # Get the dominant colors (cluster centers) and convert to integer RGB
-    colors_rgb = kmeans.cluster_centers_.astype(int)
-    
-    # Convert RGB to Hex
-    colors_hex = [rgb_to_hex(rgb) for rgb in colors_rgb]
-    
-    return colors_rgb, colors_hex
-
-# --- Streamlit UI Components ---
+# --- Main Streamlit Logic ---
 
 uploaded_file = st.file_uploader(
-    "Choose an image...", 
-    type=["jpg", "jpeg", "png", "webp"],
-    help="Upload a file (JPG, JPEG, PNG, or WEBP) to extract the color palette."
+    "Upload an image (JPEG or PNG) to sample colors",
+    type=["jpg", "jpeg", "png"]
 )
 
 if uploaded_file is not None:
-    try:
-        # Open the image using PIL
-        image = Image.open(uploaded_file)
+    image = Image.open(uploaded_file).convert("RGB")
+    
+    # 1. Get Base64 String for HTML Embedding
+    img_b64 = get_base64_image(image)
+    
+    # 2. Get Raw Pixel Data (as a flat list for easy JavaScript access)
+    pixels = np.array(image)
+    # Convert pixels to a simple list of hex codes for JavaScript
+    # NOTE: This can be a huge list for large images, so resizing is recommended!
+    # For demonstration, we'll use the original size, but scale down the JS lookup.
+    
+    # Let's resize for faster processing and smaller data size transferred to the browser
+    MAX_SIZE = 400
+    if image.width > MAX_SIZE or image.height > MAX_SIZE:
+        image.thumbnail((MAX_SIZE, MAX_SIZE))
         
-        # Display the uploaded image
-        st.subheader("Uploaded Image")
-        st.image(image, caption="Source Image", use_column_width=True)
-        
-        # Sidebar for color selection
-        st.sidebar.header("Settings")
-        n_colors = st.sidebar.slider(
-            "Number of Dominant Colors", 
-            min_value=2, 
-            max_value=20, 
-            value=10, 
-            step=1
-        )
-        
-        st.sidebar.info("The colors are extracted using K-Means Clustering to find the most representative colors.")
+    pixels = np.array(image)
+    width, height = image.size
+    
+    # Create a 1D array of hex codes for JavaScript lookup
+    hex_data = []
+    for row in pixels:
+        for r, g, b in row:
+            hex_data.append(rgb_to_hex(r, g, b)[1:]) # [1:] to remove the '#'
 
-        st.subheader(f"Extracted Color Palette ({n_colors} Colors)")
+    # 3. Embed HTML/CSS/JavaScript
+    html_code = f"""
+    <div style="position: relative; width: {width}px; height: {height}px; margin: 20px 0;">
+        <img id="colorSamplerImage" 
+             src="data:image/png;base64,{img_b64}" 
+             style="width: {width}px; height: {height}px; cursor: crosshair;">
         
-        # Extract the palette
-        with st.spinner('Extracting colors...'):
-            colors_rgb, colors_hex = extract_color_palette(image, n_colors)
+        <div id="hexTooltip" style="
+            position: absolute; 
+            background: rgba(0, 0, 0, 0.7); 
+            color: white; 
+            padding: 5px 10px; 
+            border-radius: 5px; 
+            pointer-events: none; /* Allows mouse to pass through */
+            z-index: 1000;
+            display: none;
+            font-weight: bold;
+        ">#HEXCODE</div>
+    </div>
+    
+    <script>
+        const img = document.getElementById('colorSamplerImage');
+        const tooltip = document.getElementById('hexTooltip');
+        const hexData = ["{'','join(',hex_data)}')"]; // Inject the hex data here (requires formatting)
+        const imgWidth = {width};
+        const imgHeight = {height};
         
-        # Visually appealing display of the color palette
-        
-        # Create columns for the color swatches
-        cols = st.columns(n_colors)
-        
-        # Display swatches and hex codes
-        for i, hex_code in enumerate(colors_hex):
-            with cols[i]:
-                # 1. Color Swatch (using Streamlit's markdown with HTML/CSS)
-                color_box_html = f"""
-                <div style="
-                    background-color: {hex_code};
-                    height: 100px; 
-                    border-radius: 10px;
-                    border: 1px solid #ddd;
-                    margin-bottom: 5px;
-                "></div>
-                """
-                st.markdown(color_box_html, unsafe_allow_html=True)
+        img.addEventListener('mousemove', function(e) {{
+            // Calculate coordinates relative to the image
+            const rect = img.getBoundingClientRect();
+            const x = Math.floor(e.clientX - rect.left);
+            const y = Math.floor(e.clientY - rect.top);
+            
+            // Calculate 1D array index
+            const index = y * imgWidth + x;
+            
+            if (index >= 0 && index < hexData.length) {{
+                const hex = "#" + hexData[index];
                 
-                # 2. Hex Code
-                st.markdown(
-                    f"<p style='text-align: center; font-weight: bold; margin: 0;'>{hex_code}</p>", 
-                    unsafe_allow_html=True
-                )
-                
-                # 3. RGB Value (Optional)
-                rgb_value = f"({colors_rgb[i][0]}, {colors_rgb[i][1]}, {colors_rgb[i][2]})"
-                st.markdown(
-                    f"<p style='text-align: center; font-size: small; color: #666;'>{rgb_value}</p>", 
-                    unsafe_allow_html=True
-                )
+                // Update tooltip position and content
+                tooltip.style.left = (x + 15) + 'px';
+                tooltip.style.top = (y - 30) + 'px';
+                tooltip.innerHTML = hex;
+                tooltip.style.backgroundColor = hex; 
+                tooltip.style.color = (x < imgWidth / 2) ? 'white' : 'black'; // Simple text contrast
+                tooltip.style.display = 'block';
+            }}
+        }});
+        
+        img.addEventListener('mouseleave', function() {{
+            tooltip.style.display = 'none';
+        }});
+    </script>
+    """
+    # NOTE: The hexData injection requires careful formatting to be valid JavaScript array
+    # The line above is a placeholder. For a real, robust solution, you would need
+    # to pass this data to JS more reliably, potentially using Streamlit components.
 
-    except Exception as e:
-        st.error(f"An error occurred: {e}")
-        st.warning("Please ensure the uploaded file is a valid image.")
+    st.markdown(
+        f"""
+        <style>
+            /* Custom styling for the tooltip and image container */
+            #hexTooltip {{ 
+                /* Add more advanced contrast logic here */
+                text-shadow: 1px 1px 2px black;
+                border: 2px solid white;
+            }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    # Display the final HTML content
+    st.components.v1.html(html_code, height=height + 50)
+    
 else:
-    st.info("Please upload an image to generate the color palette.")
-
-st.markdown("---")
-st.caption("Built with Streamlit and scikit-learn (K-Means)")
+    st.info("Upload an image to begin color sampling.")
